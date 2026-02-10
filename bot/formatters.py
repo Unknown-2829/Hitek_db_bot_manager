@@ -1,7 +1,6 @@
 """
-Result Formatters
-Professional OSINT-style output — clean, compact, easy to copy.
-Renders perfectly on all Telegram clients.
+Result Formatters — Professional OSINT Intelligence Output
+Consolidated profile view: all linked phones, addresses, identities grouped.
 """
 
 import re
@@ -12,106 +11,118 @@ from typing import Any
 def clean_address(raw: str | None) -> str:
     """Clean garbage from address field."""
     if not raw:
-        return "N/A"
+        return ""
     addr = raw.strip()
     addr = addr.replace("!!", ", ").replace("!", ", ")
     addr = addr.lstrip(", ")
     addr = re.sub(r"[,\s]{2,}", ", ", addr)
     addr = addr.rstrip(", ").strip()
-    return addr if addr else "N/A"
+    return addr
 
 
 def _safe(value: Any) -> str:
-    """HTML-escape a value, return 'N/A' for empty."""
+    """HTML-escape a value, return empty for None."""
     if value is None:
-        return "N/A"
+        return ""
     s = str(value).strip()
-    return escape(s) if s else "N/A"
+    if s in ("None", "N/A", ""):
+        return ""
+    return escape(s)
 
 
-def format_single_result(row: dict[str, Any], index: int = 0, total: int = 0) -> str:
-    """Format a single DB row — professional OSINT data card."""
-    mobile = _safe(row.get("mobile"))
-    name = _safe(row.get("name"))
-    fname = _safe(row.get("fname"))
-    email = _safe(row.get("email"))
-    address = escape(clean_address(row.get("address")))
-    circle = _safe(row.get("circle"))
-    op_id = _safe(row.get("operator_id"))
-    alt_mobile = _safe(row.get("alt_mobile"))
-
-    header = f"▓▓▓ <b>RECORD {index}/{total}</b> ▓▓▓\n" if index else ""
-
-    block = (
-        f"{header}"
-        f"<code>┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</code>\n"
-        f"<code>┃</code> 📱  <code>{mobile}</code>\n"
-        f"<code>┃</code> 👤  {name}\n"
-        f"<code>┃</code> 👨  {fname}\n"
-    )
-
-    if email and email != "N/A":
-        block += f"<code>┃</code> 📧  <code>{email}</code>\n"
-
-    block += (
-        f"<code>┃</code> 📍  {address}\n"
-        f"<code>┃</code> 📡  {circle}\n"
-        f"<code>┃</code> 🆔  <code>{op_id}</code>\n"
-    )
-
-    if alt_mobile and alt_mobile != "N/A":
-        block += f"<code>┃</code> 📞  <code>{alt_mobile}</code>\n"
-
-    block += f"<code>┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</code>"
-
-    return block
-
-
-def format_results(rows: list[dict[str, Any]], query: str, search_type: str, elapsed_ms: int = 0) -> str:
-    """Format search results — professional OSINT output."""
+def format_profile(profile: dict[str, Any], elapsed_ms: int = 0) -> str:
+    """
+    Format consolidated OSINT profile — all linked data grouped.
+    Similar to professional OSINT tools.
+    """
     time_str = f"  ⏱ <code>{elapsed_ms}ms</code>" if elapsed_ms else ""
 
-    if not rows:
+    phones = profile.get("phones", [])
+    names = profile.get("names", [])
+    fnames = profile.get("fnames", [])
+    emails = profile.get("emails", [])
+    addresses = profile.get("addresses", [])
+    circles = profile.get("circles", [])
+    total_records = profile.get("total_records", 0)
+    seed = profile.get("seed", "")
+
+    if total_records == 0:
         return (
             "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
             "  ❌ <b>TARGET NOT FOUND</b>\n"
             "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
-            f"  🎯 Target : <code>{escape(query)}</code>\n"
-            f"  📂 Method : {escape(search_type)}{time_str}\n\n"
+            f"  🎯 Target : <code>{escape(seed)}</code>{time_str}\n\n"
             "<i>Verify the number and try again.</i>"
         )
 
-    count = len(rows)
+    # ── Build profile output ──
+    lines = []
 
-    header = (
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
-        f"  🎯 <b>TARGET LOCATED — {count} HIT{'S' if count > 1 else ''}</b>\n"
-        "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
-        f"  🔍 Query  : <code>{escape(query)}</code>\n"
-        f"  📂 Method : {escape(search_type)}{time_str}\n\n"
-    )
+    # Header
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
+    lines.append(f"  🎯 <b>TARGET LOCATED</b>{time_str}")
+    lines.append("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓")
+    lines.append("")
 
-    result_blocks = []
-    for i, row in enumerate(rows, 1):
-        result_blocks.append(format_single_result(row, i, count))
+    # Phones
+    for phone in phones:
+        lines.append(f"📞 Telephone:  <code>{escape(phone)}</code>")
 
-    footer = (
-        f"\n\n<code>{'─' * 31}</code>\n"
-        f"📊 <b>{count}</b> record{'s' if count > 1 else ''}"
+    if phones:
+        lines.append("")
+
+    # Addresses
+    for addr in addresses:
+        cleaned = escape(clean_address(addr))
+        if cleaned:
+            lines.append(f"🏘 Address:  {cleaned}")
+
+    if addresses:
+        lines.append("")
+
+    # Names
+    for name in names:
+        lines.append(f"👤 Full Name:  {escape(name)}")
+
+    # Father names
+    for fname in fnames:
+        lines.append(f"👨 Father:  {escape(fname)}")
+
+    if names or fnames:
+        lines.append("")
+
+    # Emails
+    for email in emails:
+        lines.append(f"📧 Email:  <code>{escape(email)}</code>")
+
+    if emails:
+        lines.append("")
+
+    # Circles / Region
+    if circles:
+        region = ";".join(circles)
+        lines.append(f"🗺 Region:  {escape(region)}")
+        lines.append("")
+
+    # Footer
+    lines.append(f"<code>{'─' * 31}</code>")
+    lines.append(
+        f"📊 <b>{total_records}</b> records"
+        f" · <b>{len(phones)}</b> phone{'s' if len(phones) != 1 else ''}"
         f" | ⚡ <b>HiTek OSINT</b>"
     )
 
-    return header + "\n\n".join(result_blocks) + footer
+    return "\n".join(lines)
 
 
 def format_welcome() -> str:
-    """Welcome message — professional OSINT tool branding."""
+    """Welcome — professional OSINT tool branding."""
     return (
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
         "       ⚡ <b>HiTek OSINT</b> ⚡\n"
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
         "  📊  <b>1.78B</b> Records Indexed\n"
-        "  ⚡  Instant Mobile Lookup\n"
+        "  ⚡  Deep-Link Intelligence\n"
         "  🔒  Encrypted &amp; Secure\n\n"
         "<code>─────────────────────────────────</code>\n\n"
         "📱 <b>Quick Start:</b>\n"
@@ -143,7 +154,7 @@ def format_help() -> str:
 
 
 def format_admin_help() -> str:
-    """Admin panel — organized command reference."""
+    """Admin panel."""
     return (
         "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n"
         "        🔐 <b>Admin Panel</b>\n"

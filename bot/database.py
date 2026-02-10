@@ -1,7 +1,7 @@
 """
 Async SQLite Database Manager
 Handles all DB operations with retry logic for locked/busy database.
-Optimized for 1.78B row dataset.
+Optimized for 1.78B row dataset with deep-link search capability.
 """
 
 import asyncio
@@ -32,10 +32,9 @@ def retry_on_lock(func):
                         f"retrying in {delay}s..."
                     )
                     await asyncio.sleep(delay)
-                    delay *= 2  # exponential backoff
+                    delay *= 2
                 else:
                     raise
-        # Final attempt — let it raise
         return await func(*args, **kwargs)
     return wrapper
 
@@ -87,6 +86,157 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     @retry_on_lock
+    async def search_by_alt_mobile(self, mobile: str) -> list[dict[str, Any]]:
+        """Search alt_mobile column for linked numbers."""
+        query = "SELECT * FROM users WHERE alt_mobile = ? LIMIT ?"
+        async with self.conn.execute(query, (mobile, MAX_RESULTS)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def deep_search(self, seed_mobile: str, max_depth: int = 3) -> dict[str, Any]:
+        """
+        BFS deep-link search: follow mobile ↔ alt_mobile chains.
+        Returns a consolidated profile with all linked numbers, records, and addresses.
+        
+        Flow:
+        1. Search seed_mobile in both mobile & alt_mobile columns
+        2. Collect all alt_mobile & mobile numbers from results
+        3. Search those new numbers (BFS) up to max_depth levels
+        4. Return consolidated profile
+        """
+        visited_numbers: set[str] = set()
+        queue: list[str] = [seed_mobile]
+        all_rows: list[dict[str, Any]] = []
+        seen_rowids: set[int] = set()  # avoid duplicate rows
+
+        depth = 0
+        while queue and depth < max_depth:
+            next_queue: list[str] = []
+
+            for number in queue:
+                if number in visited_numbers:
+                    continue
+                visited_numbers.add(number)
+
+                # Search both mobile and alt_mobile columns
+                rows_mobile = await self.search_by_mobile(number)
+                rows_alt = await self.search_by_alt_mobile(number)
+
+                for row in rows_mobile + rows_alt:
+                    row_id = row.get("rowid") or id(row)
+                    # Use a content-based key to deduplicate
+                    row_key = (
+                        row.get("mobile", ""),
+                        row.get("name", ""),
+                        row.get("fname", ""),
+                        row.get("address", ""),
+                    )
+                    row_hash = hash(row_key)
+                    if row_hash not in seen_rowids:
+                        seen_rowids.add(row_hash)
+                        all_rows.append(row)
+
+                    # Collect new numbers to search
+                    mob = str(row.get("mobile", "")).strip()
+                    alt = str(row.get("alt_mobile", "")).strip()
+
+                    if mob and mob not in visited_numbers and len(mob) == 10:
+                        next_queue.append(mob)
+                    if alt and alt not in visited_numbers and len(alt) >= 10:
+                        # Clean alt_mobile if it has prefix
+                        alt_clean = alt[-10:] if len(alt) > 10 else alt
+                        if alt_clean not in visited_numbers:
+                            next_queue.append(alt_clean)
+
+            queue = next_queue
+            depth += 1
+
+        # Build consolidated profile
+        return self._build_profile(seed_mobile, all_rows, visited_numbers)
+
+    def _build_profile(
+        self,
+        seed: str,
+        rows: list[dict[str, Any]],
+        all_numbers: set[str],
+    ) -> dict[str, Any]:
+        """Consolidate rows into a single OSINT profile."""
+        phones: list[str] = []
+        addresses: list[str] = []
+        names: list[str] = []
+        fnames: list[str] = []
+        emails: list[str] = []
+        circles: list[str] = []
+        op_ids: list[str] = []
+
+        seen_phones: set[str] = set()
+        seen_addr: set[str] = set()
+        seen_names: set[str] = set()
+        seen_fnames: set[str] = set()
+        seen_emails: set[str] = set()
+        seen_circles: set[str] = set()
+
+        for row in rows:
+            # Phones
+            mob = str(row.get("mobile", "")).strip()
+            alt = str(row.get("alt_mobile", "")).strip()
+            if mob and mob not in seen_phones:
+                seen_phones.add(mob)
+                phones.append(mob)
+            if alt and alt not in seen_phones and alt != "N/A" and alt:
+                seen_phones.add(alt)
+                phones.append(alt)
+
+            # Names
+            name = str(row.get("name", "")).strip()
+            if name and name not in seen_names and name != "None":
+                seen_names.add(name)
+                names.append(name)
+
+            fname = str(row.get("fname", "")).strip()
+            if fname and fname not in seen_fnames and fname != "None":
+                seen_fnames.add(fname)
+                fnames.append(fname)
+
+            # Email
+            email = str(row.get("email", "")).strip()
+            if email and email not in seen_emails and email != "None" and email != "N/A":
+                seen_emails.add(email)
+                emails.append(email)
+
+            # Address
+            addr = str(row.get("address", "")).strip()
+            if addr and addr not in seen_addr and addr != "None":
+                seen_addr.add(addr)
+                addresses.append(addr)
+
+            # Circle
+            circle = str(row.get("circle", "")).strip()
+            if circle and circle not in seen_circles and circle != "None":
+                seen_circles.add(circle)
+                circles.append(circle)
+
+            # Operator ID
+            oid = str(row.get("operator_id", "")).strip()
+            if oid and oid != "None":
+                op_ids.append(oid)
+
+        return {
+            "seed": seed,
+            "phones": phones,
+            "names": names,
+            "fnames": fnames,
+            "emails": emails,
+            "addresses": addresses,
+            "circles": circles,
+            "op_ids": op_ids,
+            "total_records": len(rows),
+            "total_phones": len(phones),
+        }
+
+    # ── Utility Methods ────────────────────────────────────────────
+
+    @retry_on_lock
     async def search_by_name(self, name: str) -> list[dict[str, Any]]:
         """LIKE search on name — full scan, limited results."""
         query = "SELECT * FROM users WHERE name LIKE ? LIMIT ?"
@@ -95,33 +245,8 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     @retry_on_lock
-    async def search_by_email(self, email: str) -> list[dict[str, Any]]:
-        """LIKE search on email — full scan, limited results."""
-        query = "SELECT * FROM users WHERE email LIKE ? LIMIT ?"
-        async with self.conn.execute(query, (f"%{email}%", MAX_RESULTS)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    @retry_on_lock
-    async def search_by_address(self, address: str) -> list[dict[str, Any]]:
-        """LIKE search on address — full scan, limited results."""
-        query = "SELECT * FROM users WHERE address LIKE ? LIMIT ?"
-        async with self.conn.execute(query, (f"%{address}%", MAX_RESULTS)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    @retry_on_lock
-    async def search_by_fname(self, fname: str) -> list[dict[str, Any]]:
-        """LIKE search on father's name."""
-        query = "SELECT * FROM users WHERE fname LIKE ? LIMIT ?"
-        async with self.conn.execute(query, (f"%{fname}%", MAX_RESULTS)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    @retry_on_lock
     async def get_row_count(self) -> int:
         """Get approximate row count (fast for large tables)."""
-        # Use max(rowid) as approximation — much faster than COUNT(*)
         query = "SELECT MAX(rowid) FROM users"
         async with self.conn.execute(query) as cursor:
             row = await cursor.fetchone()

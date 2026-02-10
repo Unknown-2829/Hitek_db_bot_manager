@@ -1,6 +1,7 @@
 """
 User Command Handlers
 Handles /start, /help, /search, /stats, and direct text (mobile number only).
+Uses deep-link search to find all connected records.
 """
 
 import logging
@@ -14,7 +15,7 @@ from aiogram.filters import Command, CommandStart
 
 from bot.database import db
 from bot.formatters import (
-    format_results,
+    format_profile,
     format_welcome,
     format_help,
     format_stats,
@@ -61,31 +62,32 @@ def _log_search(user_id: int, username: str | None, query: str, results: int):
     )
 
 
-def _clean_mobile(raw: str) -> str | None:
+def _clean_mobile(raw: str) -> tuple[str | None, bool]:
     """
     Extract a clean 10-digit Indian mobile number from any format.
-    Handles: +91 90981 95568, 091-9098195568, 91 9098195568, 09098195568, etc.
-    Returns 10-digit string or None if invalid.
+    Returns (10-digit string or None, was_auto_corrected).
     """
-    # Remove all non-digit characters (spaces, dashes, dots, brackets, +)
     digits = re.sub(r"[^\d]", "", raw)
 
     if not digits:
-        return None
+        return None, False
+
+    original_digits = digits
 
     # Strip leading country code / trunk prefix
     if len(digits) == 12 and digits.startswith("91"):
-        digits = digits[2:]   # +91 XXXXXXXXXX → XXXXXXXXXX
+        digits = digits[2:]
     elif len(digits) == 11 and digits.startswith("0"):
-        digits = digits[1:]   # 0XXXXXXXXXX → XXXXXXXXXX
+        digits = digits[1:]
     elif len(digits) == 13 and digits.startswith("091"):
-        digits = digits[3:]   # 091 XXXXXXXXXX → XXXXXXXXXX
+        digits = digits[3:]
 
     # Must be exactly 10 digits now
     if len(digits) == 10 and digits[0] in "6789":
-        return digits
+        was_corrected = original_digits != digits
+        return digits, was_corrected
 
-    return None
+    return None, False
 
 
 # ── /start ─────────────────────────────────────────────────────────
@@ -124,8 +126,7 @@ async def cmd_search(message: Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply(
-            "⚠️ <b>Usage:</b> <code>/search 9876543210</code>\n\n"
-            "📱 Enter a <b>10-digit mobile number</b> only.",
+            "⚠️ <b>Usage:</b> <code>/search 9876543210</code>",
             parse_mode="HTML",
         )
         return
@@ -145,53 +146,43 @@ async def handle_direct_text(message: Message):
 
 # ── Core mobile search logic ──────────────────────────────────────
 async def _do_mobile_search(message: Message, raw_input: str):
-    """Clean the input, validate as 10-digit mobile, and search."""
+    """Clean the input, validate as 10-digit mobile, deep search."""
 
-    mobile = _clean_mobile(raw_input)
+    mobile, was_corrected = _clean_mobile(raw_input)
 
     if mobile is None:
         await message.reply(
-            "❌ <b>Invalid number!</b>\n\n"
-            "📱 Please enter a valid <b>10-digit Indian mobile number</b>.\n\n"
-            "<b>✅ Correct:</b>\n"
-            "  <code>9876543210</code>\n\n"
-            "<b>❌ Wrong:</b>\n"
-            "  <code>+91 9876543210</code>\n"
-            "  <code>09876543210</code>\n"
-            "  <code>hello</code>\n\n"
-            "<i>💡 Just send the 10 digits, we'll handle the rest!</i>",
+            "❌ <b>Invalid input.</b> Send a 10-digit mobile number.\n"
+            "✅ Example: <code>9876543210</code>",
             parse_mode="HTML",
         )
         return
 
-    # Check if user entered with prefix — warn them strictly
-    clean_digits = re.sub(r"[^\d]", "", raw_input)
-    prefix_warning = ""
-    if clean_digits != mobile:
-        prefix_warning = (
-            f"\n\n⚠️ <b>You entered:</b> <code>{raw_input}</code>\n"
-            f"🔄 <b>Auto-corrected to:</b> <code>{mobile}</code>\n\n"
-            f"❗ <b>Next time, enter only 10 digits!</b>\n"
-            f"❌ <code>+91 9876543210</code>\n"
-            f"❌ <code>09876543210</code>\n"
-            f"✅ <code>9876543210</code>"
-        )
+    # Simple auto-correct note — no verbose warnings
+    correct_note = ""
+    if was_corrected:
+        correct_note = f"  🔄 <code>{raw_input}</code> → <code>{mobile}</code>\n"
 
     processing = await message.reply(
-        f"🔍 <b>Searching:</b> <code>{mobile}</code>",
+        f"🔍 <b>Searching:</b> <code>{mobile}</code>\n"
+        f"{correct_note}"
+        f"⏳ <i>Running deep-link analysis...</i>",
         parse_mode="HTML",
     )
 
     try:
         t_start = time.perf_counter()
-        results = await db.search_by_mobile(mobile)
+        profile = await db.deep_search(mobile)
         elapsed_ms = int((time.perf_counter() - t_start) * 1000)
 
-        text = format_results(results, mobile, "MOBILE", elapsed_ms=elapsed_ms)
-        if prefix_warning:
-            text += prefix_warning
-        _log_search(message.from_user.id, message.from_user.username, mobile, len(results))
+        text = format_profile(profile, elapsed_ms=elapsed_ms)
+        _log_search(
+            message.from_user.id,
+            message.from_user.username,
+            mobile,
+            profile.get("total_records", 0),
+        )
         await processing.edit_text(text, parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Mobile search error: {e}")
+        logger.error(f"Deep search error: {e}")
         await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
