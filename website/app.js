@@ -7,7 +7,7 @@
 // Change this to your API URL when deployed
 const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:8000'
-    : 'https://your-api-domain.com';  // ← Replace with your VPS API URL
+    : 'https://api.unknowns.app';
 
 // ── DOM Elements ───────────────────────────────────────────
 const searchInput = document.getElementById('searchInput');
