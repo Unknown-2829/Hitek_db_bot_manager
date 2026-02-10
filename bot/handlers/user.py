@@ -1,9 +1,10 @@
 """
 User Command Handlers
-Handles /start, /help, /search, /email, /addr, /fname, /stats, and direct text searches.
+Handles /start, /help, /search, /stats, and direct text (mobile number only).
 """
 
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -48,7 +49,7 @@ def get_uptime() -> str:
     return " ".join(parts)
 
 
-def _log_search(user_id: int, username: str | None, query: str, search_type: str, results: int):
+def _log_search(user_id: int, username: str | None, query: str, results: int):
     """Log search to the search history log file."""
     global search_count
     search_count += 1
@@ -56,8 +57,35 @@ def _log_search(user_id: int, username: str | None, query: str, search_type: str
     uname = username or "N/A"
     logger.info(
         f"[SEARCH] {timestamp} | User: {user_id} (@{uname}) | "
-        f"Type: {search_type} | Query: {query} | Results: {results}"
+        f"Query: {query} | Results: {results}"
     )
+
+
+def _clean_mobile(raw: str) -> str | None:
+    """
+    Extract a clean 10-digit Indian mobile number from any format.
+    Handles: +91 90981 95568, 091-9098195568, 91 9098195568, 09098195568, etc.
+    Returns 10-digit string or None if invalid.
+    """
+    # Remove all non-digit characters (spaces, dashes, dots, brackets, +)
+    digits = re.sub(r"[^\d]", "", raw)
+
+    if not digits:
+        return None
+
+    # Strip leading country code / trunk prefix
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]   # +91 XXXXXXXXXX → XXXXXXXXXX
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]   # 0XXXXXXXXXX → XXXXXXXXXX
+    elif len(digits) == 13 and digits.startswith("091"):
+        digits = digits[3:]   # 091 XXXXXXXXXX → XXXXXXXXXX
+
+    # Must be exactly 10 digits now
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+
+    return None
 
 
 # ── /start ─────────────────────────────────────────────────────────
@@ -78,9 +106,6 @@ async def cmd_help(message: Message):
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     user_store.add_user(message.from_user.id)
-    # Import here to get the latest bot_mode
-    from bot.config import BOT_MODE
-    # We use a mutable ref from main
     import bot.state as state
 
     text = format_stats(
@@ -92,148 +117,78 @@ async def cmd_stats(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# ── /search <query> ───────────────────────────────────────────────
+# ── /search <number> ──────────────────────────────────────────────
 @router.message(Command("search"))
 async def cmd_search(message: Message):
     user_store.add_user(message.from_user.id)
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply(
-            "⚠️ <b>Usage:</b> <code>/search &lt;mobile or name&gt;</code>",
+            "⚠️ <b>Usage:</b> <code>/search 9876543210</code>\n\n"
+            "📱 Enter a <b>10-digit mobile number</b> only.",
             parse_mode="HTML",
         )
         return
 
-    query = args[1].strip()
-    await _do_search(message, query)
+    await _do_mobile_search(message, args[1].strip())
 
 
-# ── /email <query> ────────────────────────────────────────────────
-@router.message(Command("email"))
-async def cmd_email(message: Message):
-    user_store.add_user(message.from_user.id)
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "⚠️ <b>Usage:</b> <code>/email &lt;email address&gt;</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    query = args[1].strip()
-    processing = await message.reply("🔍 <b>Searching by email...</b>\n⏳ This may take a while on 1.78B records...", parse_mode="HTML")
-
-    try:
-        results = await db.search_by_email(query)
-        text = format_results(results, query, "EMAIL")
-        _log_search(message.from_user.id, message.from_user.username, query, "EMAIL", len(results))
-        await processing.edit_text(text, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Email search error: {e}")
-        await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
-
-
-# ── /addr <query> ─────────────────────────────────────────────────
-@router.message(Command("addr"))
-async def cmd_addr(message: Message):
-    user_store.add_user(message.from_user.id)
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "⚠️ <b>Usage:</b> <code>/addr &lt;address&gt;</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    query = args[1].strip()
-    processing = await message.reply("🔍 <b>Searching by address...</b>\n⏳ This may take a while on 1.78B records...", parse_mode="HTML")
-
-    try:
-        results = await db.search_by_address(query)
-        text = format_results(results, query, "ADDRESS")
-        _log_search(message.from_user.id, message.from_user.username, query, "ADDRESS", len(results))
-        await processing.edit_text(text, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Address search error: {e}")
-        await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
-
-
-# ── /fname <query> ────────────────────────────────────────────────
-@router.message(Command("fname"))
-async def cmd_fname(message: Message):
-    user_store.add_user(message.from_user.id)
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply(
-            "⚠️ <b>Usage:</b> <code>/fname &lt;father name&gt;</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    query = args[1].strip()
-    processing = await message.reply("🔍 <b>Searching by father's name...</b>\n⏳ This may take a while on 1.78B records...", parse_mode="HTML")
-
-    try:
-        results = await db.search_by_fname(query)
-        text = format_results(results, query, "FATHER NAME")
-        _log_search(message.from_user.id, message.from_user.username, query, "FNAME", len(results))
-        await processing.edit_text(text, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Father name search error: {e}")
-        await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
-
-
-# ── Direct text messages (auto-detect mobile vs name) ─────────────
+# ── Direct text messages → mobile search ──────────────────────────
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_direct_text(message: Message):
     user_store.add_user(message.from_user.id)
     query = message.text.strip()
     if not query:
         return
-    await _do_search(message, query)
+    await _do_mobile_search(message, query)
 
 
-# ── Shared search logic ───────────────────────────────────────────
-async def _do_search(message: Message, query: str):
-    """Auto-detect query type and search."""
+# ── Core mobile search logic ──────────────────────────────────────
+async def _do_mobile_search(message: Message, raw_input: str):
+    """Clean the input, validate as 10-digit mobile, and search."""
 
-    # Detect if query is a mobile number (all digits, 10-12 chars)
-    clean_query = query.replace(" ", "").replace("-", "").replace("+", "")
-    is_mobile = clean_query.isdigit() and 7 <= len(clean_query) <= 15
+    mobile = _clean_mobile(raw_input)
 
-    if is_mobile:
-        search_type = "MOBILE"
-        processing = await message.reply(
-            f"🔍 <b>Searching mobile:</b> <code>{query}</code>",
+    if mobile is None:
+        await message.reply(
+            "❌ <b>Invalid number!</b>\n\n"
+            "📱 Please enter a valid <b>10-digit Indian mobile number</b>.\n\n"
+            "<b>✅ Correct:</b>\n"
+            "  <code>9876543210</code>\n\n"
+            "<b>❌ Wrong:</b>\n"
+            "  <code>+91 9876543210</code>\n"
+            "  <code>09876543210</code>\n"
+            "  <code>hello</code>\n\n"
+            "<i>💡 Just send the 10 digits, we'll handle the rest!</i>",
             parse_mode="HTML",
         )
-        try:
-            results = await db.search_by_mobile(clean_query)
-            text = format_results(results, query, search_type)
-            _log_search(message.from_user.id, message.from_user.username, query, search_type, len(results))
-            await processing.edit_text(text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Mobile search error: {e}")
-            await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
-    else:
-        search_type = "NAME"
-        if len(query) < 3:
-            await message.reply(
-                "⚠️ <b>Name search requires at least 3 characters.</b>",
-                parse_mode="HTML",
-            )
-            return
+        return
 
-        processing = await message.reply(
-            f"🔍 <b>Searching name:</b> <code>{query}</code>\n"
-            f"⏳ This may take a while on 1.78B records...",
-            parse_mode="HTML",
+    # Check if user entered with prefix — warn them strictly
+    clean_digits = re.sub(r"[^\d]", "", raw_input)
+    prefix_warning = ""
+    if clean_digits != mobile:
+        prefix_warning = (
+            f"\n\n⚠️ <b>You entered:</b> <code>{raw_input}</code>\n"
+            f"🔄 <b>Auto-corrected to:</b> <code>{mobile}</code>\n\n"
+            f"❗ <b>Next time, enter only 10 digits!</b>\n"
+            f"❌ <code>+91 9876543210</code>\n"
+            f"❌ <code>09876543210</code>\n"
+            f"✅ <code>9876543210</code>"
         )
-        try:
-            results = await db.search_by_name(query)
-            text = format_results(results, query, search_type)
-            _log_search(message.from_user.id, message.from_user.username, query, search_type, len(results))
-            await processing.edit_text(text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Name search error: {e}")
-            await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
+
+    processing = await message.reply(
+        f"🔍 <b>Searching:</b> <code>{mobile}</code>",
+        parse_mode="HTML",
+    )
+
+    try:
+        results = await db.search_by_mobile(mobile)
+        text = format_results(results, mobile, "MOBILE")
+        if prefix_warning:
+            text += prefix_warning
+        _log_search(message.from_user.id, message.from_user.username, mobile, len(results))
+        await processing.edit_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Mobile search error: {e}")
+        await processing.edit_text(f"❌ <b>Error:</b> <code>{e}</code>", parse_mode="HTML")
